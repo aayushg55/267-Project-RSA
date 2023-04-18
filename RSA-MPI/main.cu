@@ -7,6 +7,7 @@
 #include <random>
 #include <vector>
 #include <cuda.h>
+#include "cublas_v2.h"
 
 // Command Line Option Processing
 int find_arg_idx(int argc, char** argv, const char* option) {
@@ -84,27 +85,48 @@ int main(int argc, char** argv) {
     // cudaMemcpyPeerAsync(d_0, 0, d_1, 1, num_bytes, stream_on_gpu_0);
     /* copy d_1 from GPU 1 to d_0 on GPU 0: pull copy */ 
     
-    double ARR_SIZE = 100;
-    double* rec_buff_d, send_buff_d;
+    double ARR_SIZE = 2;
+    double* rec_buff_d;
+    double* send_buff_d;
+    double* host = (double *) malloc(ARR_SIZE * sizeof(double));
+    host[0] = rank;
+    host[1] = -1;
     cudaMalloc((void**)&rec_buff_d, ARR_SIZE * sizeof(double)); /* create array on GPU 0 */
     cudaMalloc((void**)&send_buff_d, ARR_SIZE * sizeof(double)); /* create array on GPU 0 */
+    cudaMemcpy(send_buff_d, host, ARR_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    std::cout << "my rank: " << rank << "has host " << host[0] << "\n" << std::flush;
+
+    // cudaMemcpy(rec_buff_d, host, 1 * sizeof(double), cudaMemcpyHostToDevice);
     std::cout << "my rank: " << rank << "\n" << std::flush;
 
-    if (rank % 2 == 0) {
-        MPI_Send((void**)&send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD);
-        MPI_Status status;
-        MPI_Recv((void**)&rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1) % num_procs, 2, MPI_COMM_WORLD, &status);
-        // MPI_Get_count(&status, CONDENSED_PARTICLE, &size_above);
-    } else {
-        MPI_Status status;
-        MPI_Recv((void**)&rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1) % num_procs, 1, MPI_COMM_WORLD, &status);
-        // MPI_Get_count(&status, CONDENSED_PARTICLE, &size_below); 
-        MPI_Send((void**)&send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 2, MPI_COMM_WORLD); 
+    for (int i = 0; i < num_procs-1; i++) {
+        if(i % 2 == 0) {
+            if (rank % 2 == 0) {
+                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD);
+                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            } else {
+                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD); 
+            }
+        } else {
+            if (rank % 2 == 0) {
+                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD);
+                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            } else {
+                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD); 
+            }
+        }
     }
     std::cout << rank << " Finished MPI sends!\n" << std::flush;
-
-    cudaFree((void**)&rec_buff_d);
-    cudaFree((void**)&send_buff_d);
+    std::cout << "my rank: " << rank << "before at 0 " << host[0] << "\n" << std::flush;
+    std::cout << "my rank: " << rank << "before at 1 " << host[1] << "\n" << std::flush;
+    cudaMemcpy(host, rec_buff_d, 2 * sizeof(double), cudaMemcpyDeviceToHost);
+    std::cout << "my rank: " << rank << "received at 0 " << host[0] << "\n" << std::flush;
+    std::cout << "my rank: " << rank << "received at 1 " << host[1] << "\n" << std::flush;
+    cudaFree(rec_buff_d);
+    cudaFree(send_buff_d);
+    free(host);
     // Initialize Particles
    
     // MPI_Bcast(parts, num_parts, PARTICLE, 0, MPI_COMM_WORLD);
@@ -139,9 +161,5 @@ int main(int argc, char** argv) {
     //     std::cout << "Rebin Time = " << rebin << " seconds for " << num_parts
     //               << " particles.\n\n" << std::flush;
     // }
-    std::cout << rank << " before\n" << std::flush;
-
     MPI_Finalize();
-    std::cout << rank << " after\n" << std::flush;
-
 }
