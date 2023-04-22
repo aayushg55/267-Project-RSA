@@ -1,0 +1,15 @@
+num_procs: 4
+num_procs: 4
+num_procs: 4
+my rank: 0has host 0, total 4processors
+my rank: 0
+num_procs: 4
+my rank: 1has host 1, total 4processors
+my rank: 1
+my rank: 2has host 2, total 4processors
+my rank: 2
+my rank: 3has host 3, total 4processors
+my rank: 3
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd: error: *** STEP 7866123.0 ON nid001488 CANCELLED AT 2023-04-22T06:55:55 ***
+slurmstepd: error: *** JOB 7866123 ON nid001488 CANCELLED AT 2023-04-22T06:55:55 ***

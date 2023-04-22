@@ -94,27 +94,31 @@ int main(int argc, char** argv) {
     cudaMalloc((void**)&rec_buff_d, ARR_SIZE * sizeof(double)); /* create array on GPU 0 */
     cudaMalloc((void**)&send_buff_d, ARR_SIZE * sizeof(double)); /* create array on GPU 0 */
     cudaMemcpy(send_buff_d, host, ARR_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-    std::cout << "my rank: " << rank << "has host " << host[0] << "\n" << std::flush;
+    std::cout << "my rank: " << rank << "has host " << host[0] <<", total " << num_procs << " processors\n" << std::flush;
 
     // cudaMemcpy(rec_buff_d, host, 1 * sizeof(double), cudaMemcpyHostToDevice);
     std::cout << "my rank: " << rank << "\n" << std::flush;
 
     for (int i = 0; i < num_procs-1; i++) {
+        int n_r = (rank+1) % num_procs;
+        int n_l = (rank-1+num_procs) % num_procs;
         if(i % 2 == 0) {
+            
             if (rank % 2 == 0) {
-                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD);
-                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, n_r, 1, MPI_COMM_WORLD);
+                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, n_l % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             } else {
-                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD); 
+                // std::cout << "my rank: " << rank << " , recieving from " << (rank+1) % num_procs << "\n" << std::flush;
+                MPI_Recv(rec_buff_d, ARR_SIZE, MPI_DOUBLE, n_l, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(send_buff_d, ARR_SIZE, MPI_DOUBLE, n_r, 2, MPI_COMM_WORLD); 
             }
         } else {
             if (rank % 2 == 0) {
-                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD);
-                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, n_r, 1, MPI_COMM_WORLD);
+                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, n_l % num_procs, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             } else {
-                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, (rank+1) % num_procs, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, (rank-1+num_procs) % num_procs, 2, MPI_COMM_WORLD); 
+                MPI_Recv(send_buff_d, ARR_SIZE, MPI_DOUBLE, n_l, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Send(rec_buff_d, ARR_SIZE, MPI_DOUBLE, n_r, 2, MPI_COMM_WORLD); 
             }
         }
     }
