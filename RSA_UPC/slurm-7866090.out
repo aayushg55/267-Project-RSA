@@ -1,0 +1,4 @@
+slurmstepd: error: execve(): /global/u1/a/aayushg/267-Project-RSA/RSA-UPC/./main: No such file or directory
+slurmstepd: error: execve(): /global/u1/a/aayushg/267-Project-RSA/RSA-UPC/./main: No such file or directory
+srun: error: nid002373: tasks 0-1: Exited with exit code 2
+srun: launch/slurm: _step_signal: Terminating StepId=7866090.0
