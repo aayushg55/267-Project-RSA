@@ -21,19 +21,50 @@ using namespace std;
 using namespace upcxx;
 using gp_device = global_ptr<double, gpu_default_device::kind>;
 
+// Command Line Option Processing
+int find_arg_idx(int argc, char** argv, const char* option) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], option) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int find_int_arg(int argc, char** argv, const char* option, int default_value) {
+    int iplace = find_arg_idx(argc, argv, option);
+
+    if (iplace >= 0 && iplace < argc - 1) {
+        return std::stoi(argv[iplace + 1]);
+    }
+
+    return default_value;
+}
+
+char* find_string_option(int argc, char** argv, const char* option, char* default_value) {
+    int iplace = find_arg_idx(argc, argv, option);
+
+    if (iplace >= 0 && iplace < argc - 1) {
+        return argv[iplace + 1];
+    }
+
+    return default_value;
+}
+
+
 int main(int argc, char** argv) {
     init();
-    
-    int size = 1;
+
     int my_rank = rank_me();
     int num_procs = rank_n();
-
+    int NUM_LOOP_ITER = find_int_arg(argc, argv, "-i", 100);
     size_t segsize = 1024*1024*1024;         // 4 MiB
 
     auto gpu_alloc = make_gpu_allocator<cuda_device>(segsize);
     UPCXX_ASSERT_ALWAYS(gpu_alloc.is_active(), "Failed to open GPU:\n");
 
-    size_t seq_length = 720;
+    bool do_backwards = find_int_arg(argc, argv, "-b", true);
+    size_t seq_length = find_int_arg(argc, argv, "-n", 1440);
     size_t local_seq_length = ceil(seq_length/(num_procs));
     size_t qk_dim = local_seq_length;
     size_t v_dim = local_seq_length;
@@ -55,20 +86,15 @@ int main(int argc, char** argv) {
     gp_device gpu_out_scores = gpu_alloc.allocate<double>(local_seq_length*v_dim);
 
     // create dist object from all gpu arrays
-    // dist_object<gp_device> dobj_q(gpu_array);
     dist_object<gp_device> dobj_k(my_gpu_k);
     dist_object<gp_device> dobj_v(my_gpu_v);
 
-    //initialize gpu q,k,v
-
     barrier();
 
-    // cout << "my rank: " << my_rank << " , total procs: " << num_procs << "\n" << flush;
     
     cublasHandle_t handle;
     cublasCreate(&handle);
-    // size_t m = local_matrix_len;
-    // size_t lda = m;
+
     const double alp = 1;
     const double bet = 0;
     const double *alpha = &alp;
@@ -98,7 +124,7 @@ int main(int argc, char** argv) {
     // RingQK
     gp_device neighbor_gpu_k;
 
-    for (int count = 0; count < num_procs*100; ++count) {
+    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_k = dobj_k.fetch(next).wait();
         upcxx::copy(neighbor_gpu_k, gpu_recv_buff, partition_size).wait();
@@ -125,7 +151,7 @@ int main(int argc, char** argv) {
     double* d_my_out = gpu_alloc.local(gpu_out_scores);
     gp_device neighbor_gpu_v;
 
-    for (int count = 0; count < num_procs*100; ++count) {
+    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_v = dobj_v.fetch(next).wait();
 
@@ -143,91 +169,135 @@ int main(int argc, char** argv) {
 
 /****************************************************************************/
     //backwards for AV
-    // grad_output of dim local * v_dim; attn map of dim local * seq
+    // grad_upstream of dim local * v_dim; attn map of dim local * seq
     //m,n,k are post transpose
-
-    gp_device grad_output = gpu_alloc.allocate<double>(local_seq_length*v_dim);
-    double* grad_output_raw = gpu_alloc.local(grad_output);
+if (do_backwards) {
+    gp_device grad_upstream = gpu_alloc.allocate<double>(local_seq_length*v_dim);
+    double* grad_upstream_raw = gpu_alloc.local(grad_upstream);
+    curandGenerateUniformDouble(prng, grad_upstream_raw, local_seq_length*v_dim);
 
     size_t grad_v_size = seq_length * v_dim;
-    double* d_grad_v;
-    cudaMalloc((void**)&d_grad_v, grad_v_size * sizeof(double));
 
-    curandGenerateUniformDouble(prng, grad_output_raw, local_seq_length*v_dim);
+    gp_device gp_grad_v = gpu_alloc.allocate<double>(grad_v_size);
+    dist_object<gp_device> dobj_grad_v(gp_grad_v);
+    double* d_grad_v = gpu_alloc.local(gp_grad_v);
 
-    //compute grad_v = Attn_T * grad_output
+    // double* d_grad_v;
+    // cudaMalloc((void**)&d_grad_v, grad_v_size * sizeof(double));
+
+
+    //compute grad_v = Attn_T * grad_upstream
     cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
                 d_attn_scores, local_seq_length, 
-                grad_output_raw, seq_length, beta, 
+                grad_upstream_raw, seq_length, beta, 
                 d_grad_v, seq_length);
 
     // reduce grad_v
-    double* host_grad_v = (double*) malloc(grad_v_size * sizeof(double));
-    cudaMemcpy(host_grad_v, d_grad_v, grad_v_size, cudaMemcpyDeviceToHost);
-    upcxx::reduce_all(host_grad_v, host_grad_v, grad_v_size, upcxx::op_fast_add, upcxx::world()).wait();
-    cudaMemcpy(d_grad_v, host_grad_v, grad_v_size, cudaMemcpyHostToDevice);
+    // double* host_grad_v = (double*) malloc(grad_v_size * sizeof(double));
+    // cudaMemcpy(host_grad_v, d_grad_v, grad_v_size, cudaMemcpyDeviceToHost);
+    // upcxx::reduce_all(host_grad_v, host_grad_v, grad_v_size, upcxx::op_fast_add, upcxx::world()).wait();
+    // cudaMemcpy(d_grad_v, host_grad_v, grad_v_size, cudaMemcpyHostToDevice);
+        
+    // d_grad_v += d_other_grad_v (reduce in ring fashion)
+    gp_device grad_v_recv_buff = gpu_alloc.allocate<double>(grad_v_size);
+    for (int count = 1; count < num_procs; ++count) {
+        int next = (my_rank + count) % num_procs;
+
+        gp_device neighbor_grad_v = dobj_grad_v.fetch(next).wait();
+        upcxx::copy(neighbor_grad_v, grad_v_recv_buff, partition_size).wait();
+        double* d_other_grad_v = gpu_alloc.local(grad_v_recv_buff);
+        cublasDaxpy(handle, grad_v_size, alpha, d_other_grad_v, 1, d_grad_v, 1);
+        cudaDeviceSynchronize();
+    }
 
     size_t grad_attn_scores_size = local_seq_length*seq_length;
     double* d_grad_attn_scores;
     cudaMalloc((void**)&d_grad_attn_scores, grad_attn_scores_size * sizeof(double));
 
-    for (int count = 0; count < num_procs*100; ++count) {
+    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_v = dobj_v.fetch(next).wait();
 
         upcxx::copy(neighbor_gpu_v, gpu_recv_buff, partition_size).wait();
         double* d_other_v = gpu_alloc.local(gpu_recv_buff);
 
-        //compute grad_output * sub_v_T
+        //compute grad_upstream * sub_v_T
         cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, local_seq_length, local_seq_length, v_dim, alpha,
-                grad_output_raw, local_seq_length, 
+                grad_upstream_raw, local_seq_length, 
                 d_other_v, local_seq_length, 
                 alpha, 
                 d_grad_attn_scores + next*seq_seq, local_seq_length);
         cudaDeviceSynchronize();
     }
+    gpu_alloc.deallocate(gp_grad_v);
+    gpu_alloc.deallocate(grad_v_recv_buff);
+    gpu_alloc.deallocate(grad_upstream);
     barrier();
 /****************************************************************************/
 
     //backward pass for QK_T
-    // gp_device grad_output = gpu_alloc.allocate<double>(local_seq_length*seq_length);
-    // double* grad_output_raw = gpu_alloc.local(grad_output);
+    gp_device gp_grad_q = gpu_alloc.allocate<double>(partition_size);
+    double* grad_q_raw = gpu_alloc.local(gp_grad_q);
 
-    // gp_device grad_q = gpu_alloc.allocate<double>(partition_size);
-    // double* grad_q_raw = gpu_alloc.local(grad_q);
 
-    // double* grad_k_raw;
-    // cudaMalloc((void**)&grad_k_raw, seq_length * qk_dim * sizeof(double));
+    size_t grad_k_size = seq_length * qk_dim;
+    // double* d_grad_k;
+    // cudaMalloc((void**)&d_grad_k, grad_k_size * sizeof(double));
     
-    // // compute local grad_k contribution
-    // cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, qk_dim, local_seq_length, alpha,
-    //             d_grad_attn_scores, local_seq_length, 
-    //             d_my_q, local_seq_length, beta, 
-    //             grad_k_raw, seq_length);
+    gp_device gp_grad_k = gpu_alloc.allocate<double>(grad_k_size);
+    dist_object<gp_device> dobj_grad_k(gp_grad_k);
+    double* d_grad_k = gpu_alloc.local(gp_grad_k);
 
-    // //reduce grad_k over all processors
-    // double* host_grad_k = (double*) malloc(seq_length * qk_dim* sizeof(double));
-    // cudaMemcpy(host_grad_k, grad_k_raw, seq_length * qk_dim, cudaMemcpyDeviceToHost);
-    // upcxx::reduce_all(host_grad_k, host_grad_k, seq_length * qk_dim, upcxx::op_fast_add, upcxx::world()).wait();
-    // cudaMemcpy(grad_k_raw, host_grad_k, seq_length * qk_dim, cudaMemcpyHostToDevice);
+    // compute local grad_k contribution
+    cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, qk_dim, local_seq_length, alpha,
+                d_grad_attn_scores, local_seq_length, 
+                d_my_q, local_seq_length, beta, 
+                d_grad_k, seq_length);
 
-    // for (int count = 0; count < num_procs*100; ++count) {
-    //     int next = (my_rank + count) % num_procs;
+    //reduce grad_k over all processors
+    // double* host_grad_k = (double*) malloc(grad_k_size* sizeof(double));
+    // cudaMemcpy(host_grad_k, d_grad_k, grad_k_size, cudaMemcpyDeviceToHost);
+    // upcxx::reduce_all(host_grad_k, host_grad_k, grad_k_size, upcxx::op_fast_add, upcxx::world()).wait();
+    // cudaMemcpy(d_grad_k, host_grad_k, grad_k_size, cudaMemcpyHostToDevice);
 
-    //     neighbor_gpu_k = dobj_k.fetch(next).wait();
-    //     upcxx::copy(neighbor_gpu_k, gpu_recv_buff, partition_size).wait();
-    //     double* d_other_k = gpu_alloc.local(gpu_recv_buff);
+    // d_grad_k += d_other_grad_k (reduce in ring fashion)
+    gp_device grad_k_recv_buff = gpu_alloc.allocate<double>(grad_k_size);
+    for (int count = 1; count < num_procs; ++count) {
+        int next = (my_rank + count) % num_procs;
+
+        gp_device neighbor_grad_k = dobj_grad_k.fetch(next).wait();
+        upcxx::copy(neighbor_grad_k, grad_k_recv_buff, partition_size).wait();
+        double* d_other_grad_k = gpu_alloc.local(grad_k_recv_buff);
+        cublasDaxpy(handle, grad_k_size, alpha, d_other_grad_k, 1, d_grad_k, 1);
+        cudaDeviceSynchronize();
+    }
+
+    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
+        int next = (my_rank + count) % num_procs;
+
+        neighbor_gpu_k = dobj_k.fetch(next).wait();
+        upcxx::copy(neighbor_gpu_k, gpu_recv_buff, partition_size).wait();
+        double* d_other_k = gpu_alloc.local(gpu_recv_buff);
         
-    //     //compute grad_output[start:end] * sub_k
-    //     cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, local_seq_length, local_seq_length, alpha,
-    //                 d_grad_attn_scores + next*seq_seq, local_seq_length,
-    //                 d_other_k, local_seq_length,
-    //                 alpha,
-    //                 grad_q_raw, local_seq_length);
-    //     cudaDeviceSynchronize();
-    // }
+        //compute grad_attn_scores[start:end] * sub_k
+        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, local_seq_length, local_seq_length, alpha,
+                    d_grad_attn_scores + next*seq_seq, local_seq_length,
+                    d_other_k, local_seq_length,
+                    alpha,
+                    grad_q_raw, local_seq_length);
+        cudaDeviceSynchronize();
+    }
 
+    // cudaFree(d_grad_k);
+    // cudaFree(d_grad_v);
+    gpu_alloc.deallocate(grad_k_recv_buff);
+    gpu_alloc.deallocate(gp_grad_k);
+    gpu_alloc.deallocate(gp_grad_q);
+
+    cudaFree(d_grad_attn_scores);
+}
     /**********************************************************************************/
+    barrier();
     auto end_time = std::chrono::steady_clock::now();
     std::chrono::duration<double> diff = end_time - start_time;
     double seconds = diff.count();
@@ -248,11 +318,7 @@ int main(int argc, char** argv) {
     gpu_alloc.deallocate(gpu_attn_scores);
     gpu_alloc.deallocate(gpu_out_scores);
     gpu_alloc.deallocate(gpu_recv_buff);
-    // gpu_alloc.deallocate(grad_k);
-    // gpu_alloc.deallocate(grad_q);
     
-    // cudaFree(grad_k_raw);
-
     gpu_alloc.destroy();
     cout << "SUCCESS" << std::endl;
 
