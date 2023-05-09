@@ -57,17 +57,17 @@ int main(int argc, char** argv) {
 
     int my_rank = rank_me();
     int num_procs = rank_n();
-    int NUM_LOOP_ITER = find_int_arg(argc, argv, "-i", 100);
     size_t segsize = 1024*1024*1024;         // 4 MiB
 
     auto gpu_alloc = make_gpu_allocator<cuda_device>(segsize);
     UPCXX_ASSERT_ALWAYS(gpu_alloc.is_active(), "Failed to open GPU:\n");
-
+    
+    int NUM_ITER = find_int_arg(argc, argv, "-i", 100);
     bool do_backwards = find_int_arg(argc, argv, "-b", true);
     size_t seq_length = find_int_arg(argc, argv, "-n", 1440);
     size_t local_seq_length = ceil(seq_length/(num_procs));
-    size_t qk_dim = local_seq_length;
-    size_t v_dim = local_seq_length;
+    size_t qk_dim = 512;
+    size_t v_dim = 512;
 
     size_t partition_size = local_seq_length * qk_dim;
     size_t seq_seq = local_seq_length * local_seq_length;
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     // RingQK
     gp_device neighbor_gpu_k;
 
-    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
+    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_k = dobj_k.fetch(next).wait();
         upcxx::copy(neighbor_gpu_k, gpu_recv_buff, partition_size).wait();
@@ -146,12 +146,11 @@ int main(int argc, char** argv) {
 
     barrier();
 /****************************************************************************/
-    // // RingAV
-
+    // RingAV
     double* d_my_out = gpu_alloc.local(gpu_out_scores);
     gp_device neighbor_gpu_v;
 
-    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
+    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_v = dobj_v.fetch(next).wait();
 
@@ -189,7 +188,7 @@ if (do_backwards) {
     //compute grad_v = Attn_T * grad_upstream
     cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
                 d_attn_scores, local_seq_length, 
-                grad_upstream_raw, seq_length, beta, 
+                grad_upstream_raw, local_seq_length, beta, 
                 d_grad_v, seq_length);
 
     // reduce grad_v
@@ -214,7 +213,7 @@ if (do_backwards) {
     double* d_grad_attn_scores;
     cudaMalloc((void**)&d_grad_attn_scores, grad_attn_scores_size * sizeof(double));
 
-    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
+    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_v = dobj_v.fetch(next).wait();
 
@@ -224,8 +223,7 @@ if (do_backwards) {
         //compute grad_upstream * sub_v_T
         cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, local_seq_length, local_seq_length, v_dim, alpha,
                 grad_upstream_raw, local_seq_length, 
-                d_other_v, local_seq_length, 
-                alpha, 
+                d_other_v, local_seq_length, alpha, 
                 d_grad_attn_scores + next*seq_seq, local_seq_length);
         cudaDeviceSynchronize();
     }
@@ -272,7 +270,7 @@ if (do_backwards) {
         cudaDeviceSynchronize();
     }
 
-    for (int count = 0; count < num_procs*NUM_LOOP_ITER; ++count) {
+    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
 
         neighbor_gpu_k = dobj_k.fetch(next).wait();
@@ -280,7 +278,7 @@ if (do_backwards) {
         double* d_other_k = gpu_alloc.local(gpu_recv_buff);
         
         //compute grad_attn_scores[start:end] * sub_k
-        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, local_seq_length, local_seq_length, alpha,
+        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, qk_dim, local_seq_length, alpha,
                     d_grad_attn_scores + next*seq_seq, local_seq_length,
                     d_other_k, local_seq_length,
                     alpha,
