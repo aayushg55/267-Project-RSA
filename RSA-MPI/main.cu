@@ -197,7 +197,6 @@ if (do_backwards) {
 
     double* d_grad_upstream;
     cudaMalloc((void**)&d_grad_upstream, local_seq_length*v_dim * sizeof(double));
-    curandGenerateUniformDouble(prng, d_grad_upstream, local_seq_length*v_dim);
 
     size_t grad_v_size = seq_length * v_dim;
     double* d_grad_v;
@@ -216,6 +215,7 @@ if (do_backwards) {
 
     for (int j = 0; j < NUM_ITER; j++) {
         //compute grad_v = Attn_T * grad_upstream
+        curandGenerateUniformDouble(prng, d_grad_upstream, local_seq_length*v_dim);
         cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
                     d_attn_scores, local_seq_length, 
                     d_grad_upstream, local_seq_length, beta, 
