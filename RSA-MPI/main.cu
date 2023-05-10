@@ -178,27 +178,6 @@ int main(int argc, char** argv) {
         for (int i = 0; i < num_procs-1; i++) {
             double* d_other_v;
             send_and_rec(d_send_buff, d_rec_buff, &d_other_v, rank, partition_v_size, n_l, n_r, (i+1)%2);
-            // if(i % 2 == 0) {
-            //     // send from send_buff and recv new sub_v into recv
-            //     if (rank % 2 == 0) {
-            //         MPI_Send(d_send_buff, partition_v_size, MPI_DOUBLE, n_r, 1, MPI_COMM_WORLD);
-            //         MPI_Recv(d_rec_buff, partition_v_size, MPI_DOUBLE, n_l, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //     } else {
-            //         MPI_Recv(d_rec_buff, partition_v_size, MPI_DOUBLE, n_l, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //         MPI_Send(d_send_buff, partition_v_size, MPI_DOUBLE, n_r, 2, MPI_COMM_WORLD); 
-            //     }
-            //     d_other_v = d_rec_buff;
-            // } else {
-            //     // send from recv_buff and recv new sub_v into send
-            //     if (rank % 2 == 0) {
-            //         MPI_Send(d_rec_buff, partition_v_size, MPI_DOUBLE, n_r, 1, MPI_COMM_WORLD);
-            //         MPI_Recv(d_send_buff, partition_v_size, MPI_DOUBLE, n_l, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //     } else {
-            //         MPI_Recv(d_send_buff, partition_v_size, MPI_DOUBLE, n_l, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            //         MPI_Send(d_rec_buff, partition_v_size, MPI_DOUBLE, n_r, 2, MPI_COMM_WORLD); 
-            //     }
-            //     d_other_v = d_send_buff;
-            // }
 
             //compute my_a * sub_v
             size_t neighbor_rank = (rank-i-1+num_procs) % num_procs;
@@ -224,39 +203,10 @@ if (do_backwards) {
     double* d_grad_v;
     cudaMalloc((void**)&d_grad_v, grad_v_size * sizeof(double));
 
-    //compute grad_v = Attn_T * grad_upstream
-    cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
-                d_attn_scores, local_seq_length, 
-                d_grad_upstream, local_seq_length, beta, 
-                d_grad_v, seq_length);
-    cudaDeviceSynchronize();
-
-    // reduce grad_v
-    MPI_Allreduce(MPI_IN_PLACE, d_grad_v, grad_v_size, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
     size_t grad_attn_scores_size = local_seq_length*seq_length;
     double* d_grad_attn_scores;
     cudaMalloc((void**)&d_grad_attn_scores, grad_attn_scores_size * sizeof(double));
 
-    cudaMemcpy(d_send_buff, d_my_v, partition_v_size, cudaMemcpyDeviceToDevice);
-    for (int i = 0; i < num_procs-1; i++) {
-        double* d_other_v;
-        send_and_rec(d_send_buff, d_rec_buff, &d_other_v, rank, partition_qk_size, n_l, n_r, (i+1)%2);
-
-        //compute grad_upstream * sub_v_T
-        size_t neighbor_rank = (rank-i-1+num_procs) % num_procs;
-        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, local_seq_length, local_seq_length, v_dim, alpha,
-                d_grad_upstream, local_seq_length, 
-                d_other_v, local_seq_length, alpha, 
-                d_grad_attn_scores + neighbor_rank*seq_seq, local_seq_length);
-        cudaDeviceSynchronize();    
-    }
-
-    cudaFree(d_grad_upstream);
-    cudaFree(d_grad_v);
-    MPI_Barrier(MPI_COMM_WORLD);
-/*********************************************************************************************/
-    //backward pass for QK_T
     double* d_grad_q;
     cudaMalloc((void**)&d_grad_q, partition_qk_size * sizeof(double));
 
@@ -264,30 +214,65 @@ if (do_backwards) {
     double* d_grad_k;
     cudaMalloc((void**)&d_grad_k, grad_k_size * sizeof(double));
 
-    // compute local grad_k contribution
-    cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, qk_dim, local_seq_length, alpha,
-                d_grad_attn_scores, local_seq_length, 
-                d_my_q, local_seq_length, beta, 
-                d_grad_k, seq_length);
+    for (int j = 0; j < NUM_ITER; j++) {
+        //compute grad_v = Attn_T * grad_upstream
+        cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
+                    d_attn_scores, local_seq_length, 
+                    d_grad_upstream, local_seq_length, beta, 
+                    d_grad_v, seq_length);
+        cudaDeviceSynchronize();
 
-    //reduce grad_k over all processors
-    MPI_Allreduce(MPI_IN_PLACE, d_grad_k, grad_k_size, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        // reduce grad_v
+        MPI_Allreduce(MPI_IN_PLACE, d_grad_v, grad_v_size, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+        cudaMemcpy(d_send_buff, d_my_v, partition_v_size, cudaMemcpyDeviceToDevice);
+        for (int i = 0; i < num_procs-1; i++) {
+            double* d_other_v;
+            send_and_rec(d_send_buff, d_rec_buff, &d_other_v, rank, partition_qk_size, n_l, n_r, (i+1)%2);
+
+            //compute grad_upstream * sub_v_T
+            size_t neighbor_rank = (rank-i-1+num_procs) % num_procs;
+            cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, local_seq_length, local_seq_length, v_dim, alpha,
+                    d_grad_upstream, local_seq_length, 
+                    d_other_v, local_seq_length, alpha, 
+                    d_grad_attn_scores + neighbor_rank*seq_seq, local_seq_length);
+            cudaDeviceSynchronize();    
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+
+    /*********************************************************************************************/
+        //backward pass for QK_T
+
+        // compute local grad_k contribution
+        cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, qk_dim, local_seq_length, alpha,
+                    d_grad_attn_scores, local_seq_length, 
+                    d_my_q, local_seq_length, beta, 
+                    d_grad_k, seq_length);
+
+        //reduce grad_k over all processors
+        MPI_Allreduce(MPI_IN_PLACE, d_grad_k, grad_k_size, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
 
-    cudaMemcpy(d_send_buff, d_my_k, partition_v_size, cudaMemcpyDeviceToDevice);
-    for (int i = 0; i < num_procs-1; i++) {
-        double* d_other_k;
-        send_and_rec(d_send_buff, d_rec_buff, &d_other_k, rank, partition_qk_size, n_l, n_r, (i+1)%2);
+        cudaMemcpy(d_send_buff, d_my_k, partition_v_size, cudaMemcpyDeviceToDevice);
+        for (int i = 0; i < num_procs-1; i++) {
+            double* d_other_k;
+            send_and_rec(d_send_buff, d_rec_buff, &d_other_k, rank, partition_qk_size, n_l, n_r, (i+1)%2);
 
-        //compute grad_attn_scores[start:end] * sub_k
-        size_t neighbor_rank = (rank-i-1+num_procs) % num_procs;
-        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, qk_dim, local_seq_length, alpha,
-                    d_grad_attn_scores + neighbor_rank*seq_seq, local_seq_length,
-                    d_other_k, local_seq_length, alpha,
-                    d_grad_q, local_seq_length);
-        cudaDeviceSynchronize();    
+            //compute grad_attn_scores[start:end] * sub_k
+            size_t neighbor_rank = (rank-i-1+num_procs) % num_procs;
+            cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, local_seq_length, qk_dim, local_seq_length, alpha,
+                        d_grad_attn_scores + neighbor_rank*seq_seq, local_seq_length,
+                        d_other_k, local_seq_length, alpha,
+                        d_grad_q, local_seq_length);
+            cudaDeviceSynchronize();    
+        }
     }
-    
+
+    cudaFree(d_grad_upstream);
+    cudaFree(d_grad_v);
+    cudaFree(d_grad_k);
+    cudaFree(d_grad_q);
+    cudaFree(d_grad_attn_scores);
 }
 /*********************************************************************************************/
     MPI_Barrier(MPI_COMM_WORLD);
