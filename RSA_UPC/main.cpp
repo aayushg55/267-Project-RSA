@@ -173,7 +173,6 @@ int main(int argc, char** argv) {
 if (do_backwards) {
     gp_device grad_upstream = gpu_alloc.allocate<double>(local_seq_length*v_dim);
     double* grad_upstream_raw = gpu_alloc.local(grad_upstream);
-    curandGenerateUniformDouble(prng, grad_upstream_raw, local_seq_length*v_dim);
 
     size_t grad_v_size = seq_length * v_dim;
 
@@ -181,9 +180,24 @@ if (do_backwards) {
     dist_object<gp_device> dobj_grad_v(gp_grad_v);
     double* d_grad_v = gpu_alloc.local(gp_grad_v);
 
-    // double* d_grad_v;
-    // cudaMalloc((void**)&d_grad_v, grad_v_size * sizeof(double));
+    gp_device grad_v_recv_buff = gpu_alloc.allocate<double>(grad_v_size);
 
+    size_t grad_attn_scores_size = local_seq_length*seq_length;
+    double* d_grad_attn_scores;
+    cudaMalloc((void**)&d_grad_attn_scores, grad_attn_scores_size * sizeof(double));
+
+    gp_device gp_grad_q = gpu_alloc.allocate<double>(partition_size);
+    double* grad_q_raw = gpu_alloc.local(gp_grad_q);
+
+    size_t grad_k_size = seq_length * qk_dim;
+    gp_device gp_grad_k = gpu_alloc.allocate<double>(grad_k_size);
+    dist_object<gp_device> dobj_grad_k(gp_grad_k);
+    double* d_grad_k = gpu_alloc.local(gp_grad_k);
+
+    gp_device grad_k_recv_buff = gpu_alloc.allocate<double>(grad_k_size);
+
+for (int j = 0; j < NUM_ITER; j++) {
+    curandGenerateUniformDouble(prng, grad_upstream_raw, local_seq_length*v_dim);
 
     //compute grad_v = Attn_T * grad_upstream
     cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, v_dim, local_seq_length, alpha,
@@ -192,13 +206,8 @@ if (do_backwards) {
                 d_grad_v, seq_length);
 
     // reduce grad_v
-    // double* host_grad_v = (double*) malloc(grad_v_size * sizeof(double));
-    // cudaMemcpy(host_grad_v, d_grad_v, grad_v_size, cudaMemcpyDeviceToHost);
-    // upcxx::reduce_all(host_grad_v, host_grad_v, grad_v_size, upcxx::op_fast_add, upcxx::world()).wait();
-    // cudaMemcpy(d_grad_v, host_grad_v, grad_v_size, cudaMemcpyHostToDevice);
         
     // d_grad_v += d_other_grad_v (reduce in ring fashion)
-    gp_device grad_v_recv_buff = gpu_alloc.allocate<double>(grad_v_size);
     for (int count = 1; count < num_procs; ++count) {
         int next = (my_rank + count) % num_procs;
 
@@ -209,9 +218,6 @@ if (do_backwards) {
         cudaDeviceSynchronize();
     }
 
-    size_t grad_attn_scores_size = local_seq_length*seq_length;
-    double* d_grad_attn_scores;
-    cudaMalloc((void**)&d_grad_attn_scores, grad_attn_scores_size * sizeof(double));
 
     for (int count = 0; count < num_procs*NUM_ITER; ++count) {
         int next = (my_rank + count) % num_procs;
@@ -227,24 +233,11 @@ if (do_backwards) {
                 d_grad_attn_scores + next*seq_seq, local_seq_length);
         cudaDeviceSynchronize();
     }
-    gpu_alloc.deallocate(gp_grad_v);
-    gpu_alloc.deallocate(grad_v_recv_buff);
-    gpu_alloc.deallocate(grad_upstream);
+
     barrier();
 /****************************************************************************/
 
     //backward pass for QK_T
-    gp_device gp_grad_q = gpu_alloc.allocate<double>(partition_size);
-    double* grad_q_raw = gpu_alloc.local(gp_grad_q);
-
-
-    size_t grad_k_size = seq_length * qk_dim;
-    // double* d_grad_k;
-    // cudaMalloc((void**)&d_grad_k, grad_k_size * sizeof(double));
-    
-    gp_device gp_grad_k = gpu_alloc.allocate<double>(grad_k_size);
-    dist_object<gp_device> dobj_grad_k(gp_grad_k);
-    double* d_grad_k = gpu_alloc.local(gp_grad_k);
 
     // compute local grad_k contribution
     cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_length, qk_dim, local_seq_length, alpha,
@@ -253,13 +246,7 @@ if (do_backwards) {
                 d_grad_k, seq_length);
 
     //reduce grad_k over all processors
-    // double* host_grad_k = (double*) malloc(grad_k_size* sizeof(double));
-    // cudaMemcpy(host_grad_k, d_grad_k, grad_k_size, cudaMemcpyDeviceToHost);
-    // upcxx::reduce_all(host_grad_k, host_grad_k, grad_k_size, upcxx::op_fast_add, upcxx::world()).wait();
-    // cudaMemcpy(d_grad_k, host_grad_k, grad_k_size, cudaMemcpyHostToDevice);
-
     // d_grad_k += d_other_grad_k (reduce in ring fashion)
-    gp_device grad_k_recv_buff = gpu_alloc.allocate<double>(grad_k_size);
     for (int count = 1; count < num_procs; ++count) {
         int next = (my_rank + count) % num_procs;
 
@@ -285,9 +272,13 @@ if (do_backwards) {
                     grad_q_raw, local_seq_length);
         cudaDeviceSynchronize();
     }
+    barrier();
+}
 
-    // cudaFree(d_grad_k);
-    // cudaFree(d_grad_v);
+    gpu_alloc.deallocate(gp_grad_v);
+    gpu_alloc.deallocate(grad_v_recv_buff);
+    gpu_alloc.deallocate(grad_upstream);
+
     gpu_alloc.deallocate(grad_k_recv_buff);
     gpu_alloc.deallocate(gp_grad_k);
     gpu_alloc.deallocate(gp_grad_q);
@@ -302,7 +293,7 @@ if (do_backwards) {
 
     //     // Finalize
     if (my_rank == 0) {
-        cout << "Time = " << seconds << " seconds\n" << flush;
+        cout << "Time = " << seconds << " seconds with seq_length " << seq_length << "\n" << flush;
     }
 
     delete_array(host_recv_buff);
