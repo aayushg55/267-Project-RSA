@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
     auto gpu_alloc = make_gpu_allocator<cuda_device>(segsize);
     UPCXX_ASSERT_ALWAYS(gpu_alloc.is_active(), "Failed to open GPU:\n");
     
-    int NUM_ITER = find_int_arg(argc, argv, "-i", 100);
+    int NUM_ITER = find_int_arg(argc, argv, "-i", 1);
     bool do_backwards = find_int_arg(argc, argv, "-b", true);
     size_t seq_length = find_int_arg(argc, argv, "-n", 1440);
     size_t local_seq_length = ceil(seq_length/(num_procs));
@@ -219,7 +219,7 @@ for (int j = 0; j < NUM_ITER; j++) {
     }
 
 
-    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
+    for (int count = 0; count < num_procs; ++count) {
         int next = (my_rank + count) % num_procs;
         neighbor_gpu_v = dobj_v.fetch(next).wait();
 
@@ -257,7 +257,7 @@ for (int j = 0; j < NUM_ITER; j++) {
         cudaDeviceSynchronize();
     }
 
-    for (int count = 0; count < num_procs*NUM_ITER; ++count) {
+    for (int count = 0; count < num_procs; ++count) {
         int next = (my_rank + count) % num_procs;
 
         neighbor_gpu_k = dobj_k.fetch(next).wait();
@@ -272,7 +272,7 @@ for (int j = 0; j < NUM_ITER; j++) {
                     grad_q_raw, local_seq_length);
         cudaDeviceSynchronize();
     }
-    barrier();
+
 }
 
     gpu_alloc.deallocate(gp_grad_v);
