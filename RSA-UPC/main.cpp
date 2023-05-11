@@ -138,8 +138,6 @@ int main(int argc, char** argv) {
                     d_attn_scores+seq_seq*next, local_seq_length);
         cudaDeviceSynchronize();
     }
-
-    // copy(gpu_attn_scores, host_array_attn, local_matrix_size*num_procs).wait();
 /****************************************************************************/
 
     //compute softmax over entire attn_scores matrix
@@ -193,6 +191,11 @@ if (do_backwards) {
     gp_device gp_grad_k = gpu_alloc.allocate<double>(grad_k_size);
     dist_object<gp_device> dobj_grad_k(gp_grad_k);
     double* d_grad_k = gpu_alloc.local(gp_grad_k);
+    
+    double* d_my_grad_v;
+    cudaMalloc((void**)&d_my_grad_v, grad_v_size * sizeof(double));
+    double* d_my_grad_k;
+    cudaMalloc((void**)&d_my_grad_k, grad_k_size * sizeof(double));
 
     gp_device grad_k_recv_buff = gpu_alloc.allocate<double>(grad_k_size);
 
@@ -213,7 +216,7 @@ for (int j = 0; j < NUM_ITER; j++) {
         gp_device neighbor_grad_v = dobj_grad_v.fetch(next).wait();
         upcxx::copy(neighbor_grad_v, grad_v_recv_buff, partition_size).wait();
         double* d_other_grad_v = gpu_alloc.local(grad_v_recv_buff);
-        cublasDaxpy(handle, grad_v_size, alpha, d_other_grad_v, 1, d_grad_v, 1);
+        cublasDaxpy(handle, grad_v_size, alpha, d_other_grad_v, 1, d_my_grad_v, 1);
         cudaDeviceSynchronize();
     }
 
@@ -252,7 +255,7 @@ for (int j = 0; j < NUM_ITER; j++) {
         gp_device neighbor_grad_k = dobj_grad_k.fetch(next).wait();
         upcxx::copy(neighbor_grad_k, grad_k_recv_buff, partition_size).wait();
         double* d_other_grad_k = gpu_alloc.local(grad_k_recv_buff);
-        cublasDaxpy(handle, grad_k_size, alpha, d_other_grad_k, 1, d_grad_k, 1);
+        cublasDaxpy(handle, grad_k_size, alpha, d_other_grad_k, 1, d_my_grad_k, 1);
         cudaDeviceSynchronize();
     }
 
