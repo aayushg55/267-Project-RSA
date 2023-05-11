@@ -83,7 +83,6 @@ int main(int argc, char** argv) {
     bool do_backwards = find_int_arg(argc, argv, "-b", true);
     size_t seq_length = find_int_arg(argc, argv, "-n", 1440);
     size_t local_seq_length = ceil(seq_length/(num_procs));
-    // size_t local_seq_length = ceil(seq_length);
 
     size_t qk_dim = 512;
     size_t v_dim = 512;
@@ -134,7 +133,6 @@ int main(int argc, char** argv) {
     auto start_time = std::chrono::steady_clock::now();
 /*********************************************************************************************/
     // Ring QK
-    // cout << "my rank: " << rank << " n_r " << n_r << " n_l " << n_l << " numproc " << num_procs << " count " << partition_qk_size << "\n" << flush;
 
     for (int iter = 0; iter < NUM_ITER; iter++) {
         cudaMemcpy(d_send_buff, d_my_k, partition_qk_size, cudaMemcpyDeviceToDevice);
@@ -294,26 +292,6 @@ if (do_backwards) {
 
     MPI_Barrier(MPI_COMM_WORLD);
     // Finalize
-    std::cout << "SUCCESS!\n" << std::flush;
 
-    // if (rank == 1) {
-    //     std::cout << "Init Time = " << init_time << " seconds for " << num_parts
-    //               << " particles.\n" << std::flush;
-    //     std::cout << "Apply force Time = " << apply_force_time << " seconds for " << num_parts
-    //               << " particles.\n" << std::flush;
-    //     std::cout << "Clear above/below grids = " << clear_grid_above_below << " seconds for " << num_parts
-    //               << " particles.\n" << std::flush;
-      
-    //     std::cout << "Move Time = " << move_time << " seconds for " << num_parts
-    //             << " particles.\n" << std::flush;
-    //     std::cout << "Ghost send setup time = " << ghost_send << " seconds for " << num_parts
-    //             << " particles.\n" << std::flush;
-    //     std::cout << "Communication Time = " << comm << " seconds for " << num_parts
-    //             << " particles.\n" << std::flush;    
-    //     std::cout << "Clear send vectors Time = " << send_clear_time << " seconds for " << num_parts
-    //               << " particles.\n" << std::flush;
-    //     std::cout << "Rebin Time = " << rebin << " seconds for " << num_parts
-    //               << " particles.\n\n" << std::flush;
-    // }
     MPI_Finalize();
 }

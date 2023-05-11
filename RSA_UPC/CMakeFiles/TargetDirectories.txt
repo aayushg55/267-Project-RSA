@@ -1,2 +1,0 @@
-/global/homes/a/aayushg/267-Project-RSA/RSA-UPC/CMakeFiles/edit_cache.dir
-/global/homes/a/aayushg/267-Project-RSA/RSA-UPC/CMakeFiles/rebuild_cache.dir

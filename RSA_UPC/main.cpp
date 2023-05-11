@@ -206,7 +206,6 @@ for (int j = 0; j < NUM_ITER; j++) {
                 d_grad_v, seq_length);
 
     // reduce grad_v
-        
     // d_grad_v += d_other_grad_v (reduce in ring fashion)
     for (int count = 1; count < num_procs; ++count) {
         int next = (my_rank + count) % num_procs;
@@ -291,7 +290,7 @@ for (int j = 0; j < NUM_ITER; j++) {
     std::chrono::duration<double> diff = end_time - start_time;
     double seconds = diff.count();
 
-    //     // Finalize
+    // Finalize
     if (my_rank == 0) {
         cout << "Time = " << seconds << " seconds with seq_length " << seq_length << "\n" << flush;
     }
@@ -309,7 +308,6 @@ for (int j = 0; j < NUM_ITER; j++) {
     gpu_alloc.deallocate(gpu_recv_buff);
     
     gpu_alloc.destroy();
-    cout << "SUCCESS" << std::endl;
 
     finalize();
     return 0;
